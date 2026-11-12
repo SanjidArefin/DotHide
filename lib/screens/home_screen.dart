@@ -61,27 +61,46 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    final selected = await Navigator.of(context).push<String>(
+    final selected = await Navigator.of(context).push<List<String>>(
       MaterialPageRoute(builder: (_) => const FolderPickerScreen()),
     );
-    if (selected == null || !mounted) return;
+    if (selected == null || selected.isEmpty || !mounted) return;
 
-    if (FolderService.isHidden(selected)) {
-      _notify('That folder is already hidden.');
+    // The picker skips already-hidden folders, but a rescan or an external
+    // change may have hidden one in the meantime.
+    final targets = selected.where((path) => !FolderService.isHidden(path)).toList(growable: false);
+    if (targets.isEmpty) {
+      _notify('Those folders are already hidden.');
       return;
     }
 
     setState(() => _busy = true);
     try {
-      final newPath = await _folders.hide(selected);
-      await _store.add(newPath);
+      final result = await _folders.hideAll(targets);
+      for (final path in result.hidden) {
+        await _store.add(path);
+      }
       await _load();
-      _notify('Hidden ${FolderService.displayName(newPath)}');
-    } on FolderOperationException catch (error) {
-      _notify(error.message);
+      _notify(_summarize(result));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
+  }
+
+  /// Turns a batch outcome into a single short line, naming the first failure.
+  String _summarize(BatchHideResult result) {
+    final hidden = result.hidden.length;
+    if (!result.hasFailures) {
+      return 'Hidden $hidden folder${hidden == 1 ? '' : 's'}';
+    }
+
+    final first = result.failed.first;
+    final reason = '${FolderService.displayName(first.path)}: ${first.message}';
+    if (hidden == 0) {
+      return result.failed.length == 1 ? reason : 'Could not hide any folder. $reason';
+    }
+    final failed = result.failed.length;
+    return 'Hidden $hidden folder${hidden == 1 ? '' : 's'}, $failed failed — $reason';
   }
 
   Future<void> _unhide(String path) async {
@@ -225,14 +244,13 @@ class _HomeScreenState extends State<HomeScreen> {
       body: Column(
         children: [
           if (_access != StorageAccess.granted) _AccessBanner(onFix: _load),
-          Expanded(child: _buildBody(theme)),
-        ],
+          Expanded(child: _buildBody(theme)),        ],
       ),
       floatingActionButton: _access == StorageAccess.granted
           ? FloatingActionButton.extended(
               onPressed: _busy ? null : _hideFolder,
               icon: const Icon(Icons.add),
-              label: const Text('Hide folder'),
+              label: const Text('Hide folders'),
             )
           : null,
     );

@@ -5,10 +5,12 @@ import 'package:path/path.dart' as p;
 
 import '../services/permission_service.dart';
 
-/// Built-in directory browser used to choose a folder to hide.
+/// Built-in directory browser used to choose folders to hide.
 ///
 /// It relies on the all-files access granted earlier, so it can start at the
 /// shared external storage root and walk anywhere the user has access.
+/// Folders are multi-select: tapping a row checks it, tapping its name opens it.
+/// Pops with the list of checked paths (empty when cancelled).
 class FolderPickerScreen extends StatefulWidget {
   const FolderPickerScreen({
     super.key,
@@ -29,6 +31,10 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
   bool _loading = true;
   String? _error;
 
+  /// Checked paths keyed by normalized path, so the current folder's row can be
+  /// rendered as checked without a second data structure.
+  final Map<String, String> _checked = {};
+
   @override
   void initState() {
     super.initState();
@@ -37,6 +43,8 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
   }
 
   bool get _atRoot => p.normalize(_current) == p.normalize(widget.rootPath);
+
+  bool get _currentChecked => _checked.containsKey(p.normalize(_current));
 
   Future<void> _load() async {
     setState(() {
@@ -74,8 +82,8 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
     }
   }
 
-  void _open(Directory directory) {
-    setState(() => _current = directory.path);
+  void _open(String path) {
+    setState(() => _current = path);
     _load();
   }
 
@@ -87,19 +95,37 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
     _load();
   }
 
+  void _toggle(String path) {
+    final normalized = p.normalize(path);
+    setState(() {
+      if (_checked.remove(normalized) == null) {
+        _checked[normalized] = normalized;
+      }
+    });
+  }
+
+  void _finish() => Navigator.of(context).pop(_checked.values.toList(growable: false));
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final canSelect = !_atRoot;
+    final count = _checked.length;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Choose folder'),
+        title: const Text('Choose folders'),
         leading: IconButton(
           icon: const Icon(Icons.arrow_upward),
           tooltip: 'Up one level',
           onPressed: _atRoot ? null : _goUp,
         ),
+        actions: [
+          if (count > 0)
+            TextButton(
+              onPressed: () => setState(_checked.clear),
+              child: const Text('Clear'),
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -119,9 +145,29 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
       ),
       bottomNavigationBar: SafeArea(
         minimum: const EdgeInsets.all(16),
-        child: FilledButton(
-          onPressed: canSelect ? () => Navigator.of(context).pop(_current) : null,
-          child: Text(canSelect ? 'Hide this folder' : 'Open a folder to select it'),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            OutlinedButton.icon(
+              onPressed: _atRoot ? null : () => _toggle(_current),
+              icon: Icon(_currentChecked ? Icons.check_box : Icons.check_box_outline_blank),
+              label: Text(
+                _atRoot
+                    ? 'Cannot pick the storage root'
+                    : (_currentChecked ? 'Uncheck this folder' : 'Check this folder'),
+              ),
+            ),
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: count == 0 ? null : _finish,
+              icon: const Icon(Icons.visibility_off_outlined),
+              label: Text(
+                count == 0
+                    ? 'Select folders to hide'
+                    : 'Hide Selected ($count ${count == 1 ? 'folder' : 'folders'})',
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -142,7 +188,7 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
       return const _Message(
         icon: Icons.folder_off_outlined,
         title: 'No subfolders',
-        message: 'This folder has no subfolders to show.',
+        message: 'This folder has no subfolders to show. Check this folder instead to hide it.',
       );
     }
 
@@ -151,11 +197,21 @@ class _FolderPickerScreenState extends State<FolderPickerScreen> {
       separatorBuilder: (_, _) => Divider(height: 1, color: theme.colorScheme.outlineVariant),
       itemBuilder: (context, index) {
         final directory = _entries[index];
+        final path = p.normalize(directory.path);
+        final name = p.basename(path);
+        final checked = _checked.containsKey(path);
+
         return ListTile(
-          leading: Icon(Icons.folder_outlined, color: theme.colorScheme.onSurfaceVariant),
-          title: Text(p.basename(directory.path), maxLines: 1, overflow: TextOverflow.ellipsis),
+          // The checkbox is its own tap target, so selecting never triggers a
+          // navigation and opening never changes the selection.
+          leading: Checkbox(
+            value: checked,
+            onChanged: (_) => _toggle(path),
+            semanticLabel: 'Select $name',
+          ),
+          title: Text(name, maxLines: 1, overflow: TextOverflow.ellipsis),
           trailing: Icon(Icons.chevron_right, color: theme.colorScheme.outline),
-          onTap: () => _open(directory),
+          onTap: () => _open(path),
         );
       },
     );

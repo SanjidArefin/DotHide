@@ -81,12 +81,12 @@ flowchart TD
 | --- | --- |
 | [lib/app.dart](lib/app.dart) | Root shell: mandatory lock, permission gate, re-lock on resume |
 | [lib/screens/](lib/screens) | Onboarding, lock, permission, home, folder picker, settings |
-| [lib/services/folder_service.dart](lib/services/folder_service.dart) | Hide/unhide by toggling the dot prefix |
+| [lib/services/folder_service.dart](lib/services/folder_service.dart) | Hide/unhide by toggling the dot prefix; single and batch |
 | [lib/services/hidden_store.dart](lib/services/hidden_store.dart) | Persists the hidden folder path list |
 | [lib/services/lock_store.dart](lib/services/lock_store.dart) | Salted SHA-256 lock storage |
 | [lib/services/rescan_service.dart](lib/services/rescan_service.dart) | Finds dot-folders after a reinstall |
 | [lib/services/permission_service.dart](lib/services/permission_service.dart) | All-files access checks and requests |
-| [lib/services/media_scanner_service.dart](lib/services/media_scanner_service.dart) | Best-effort `MediaStore` refresh |
+| [lib/services/media_scanner_service.dart](lib/services/media_scanner_service.dart) | Best-effort `MediaStore` refresh, single or batch |
 | [lib/services/biometric_service.dart](lib/services/biometric_service.dart) | Fingerprint availability and auth |
 | [lib/widgets/](lib/widgets) | `PinPad`, `PatternLock`, verify dialog, empty states |
 | [lib/theme/app_theme.dart](lib/theme/app_theme.dart) | Grey/white monochrome light + dark themes |
@@ -139,16 +139,26 @@ After unlocking for the first time, DotHide asks for file access.
 If access is refused, the button changes to **Open settings** so you can enable it manually.
 While access is missing, the home screen shows a banner and hiding is unavailable.
 
-### 3. Hide a folder
+### 3. Hide folders
 
-1. On the home screen, tap **Hide folder**.
-2. Browse to the folder: tap a folder to open it, tap ↑ to go up one level.
-3. Tap **Hide this folder** at the bottom.
+1. On the home screen, tap **Hide folders**.
+2. Browse to a folder: tap the row to open it, tap ↑ to go up one level.
+3. Tick the checkbox on every folder you want to hide. Selections persist while you
+   navigate, so you can pick folders from several different parents in one pass.
+4. If the folder you are currently in is not listed in itself, tap **Check this folder**
+   at the bottom to select the folder you are browsing.
+5. Tap **Hide Selected (n)**.
 
-The folder is renamed `MyFolder` → `.MyFolder` and is added to the list on the home screen.
-`MediaStore` is refreshed so the folder disappears from galleries and file apps right away.
+Each selected folder is renamed `MyFolder` → `.MyFolder` and added to the list on the home
+screen. The media scanner is refreshed once for the whole batch — every hidden folder plus
+its parent — so all of them disappear from galleries and file apps together.
 
-Folders that are already hidden, and the storage root itself, cannot be selected.
+A folder that cannot be hidden (already hidden, missing, or a name collision) is skipped and
+does not stop the rest. The result names the first failure, for example
+*"Hidden 2 folders, 1 failed — Alpha: Folder is already hidden."*
+
+The storage root itself cannot be selected. Folders that are already hidden are not listed.
+Use **Clear** in the app bar to drop the whole selection.
 
 ### 4. Unhide a folder
 
@@ -198,8 +208,9 @@ Tap the **gear** icon on the home screen.
 | Symptom | Cause and fix |
 | --- | --- |
 | "Permission denied" when hiding | All-files access was revoked. Re-grant it and retry. |
-| "Folder is already hidden" | The name already starts with a dot — unhide it instead. |
+| "Hidden n folders, m failed — X: Folder is already hidden" | A selected folder was hidden by another path. The rest still succeeded. |
 | "… already exists in this location" | A folder or file with the target name exists. Rename or remove it first. |
+| "X: Folder no longer exists" | A selected folder was moved or deleted before hiding. Re-run the picker. |
 | "The folder is in use by another app" | Close the app using the folder (file manager, media app) and retry. |
 | "Missing on device" on a row | The folder was moved or deleted outside DotHide. The entry is pruned on the next refresh. |
 | Hidden folder still visible in a gallery | Some gallery apps cache results. Force-stop the gallery or rescan in DotHide. |
@@ -227,4 +238,5 @@ flutter test
 - [test/lock_store_test.dart](test/lock_store_test.dart) — type storage, verification,
   salted hashing, no plaintext on disk, method replacement, fingerprint gating.
 - [test/folder_service_test.dart](test/folder_service_test.dart) — dot toggling, untouched
-  contents, error cases, `RescanService` filtering and depth limits.
+  contents, error cases, batch hiding (partial failure, collision, single scanner pass),
+  `RescanService` filtering and depth limits.

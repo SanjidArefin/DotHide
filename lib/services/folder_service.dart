@@ -14,6 +14,30 @@ class FolderOperationException implements Exception {
   String toString() => message;
 }
 
+/// A folder that could not be hidden during a batch operation.
+class BatchHideFailure {
+  BatchHideFailure(this.path, this.message);
+
+  /// The path that was requested, before any rename was attempted.
+  final String path;
+
+  /// Why the folder could not be hidden, ready to display.
+  final String message;
+}
+
+/// Outcome of [FolderService.hideAll].
+class BatchHideResult {
+  BatchHideResult({required this.hidden, required this.failed});
+
+  /// New dot-prefixed paths, in the order the folders were processed.
+  final List<String> hidden;
+
+  /// Folders that were skipped, with a reason for each.
+  final List<BatchHideFailure> failed;
+
+  bool get hasFailures => failed.isNotEmpty;
+}
+
 /// Hides/unhides a folder purely by toggling a leading `.` on its name.
 ///
 /// Only `Directory.rename` is used — files inside are never moved, renamed,
@@ -33,7 +57,40 @@ class FolderService {
   Future<String> unhide(String folderPath) =>
       _toggle(folderPath, hide: false);
 
+  /// Hides several folders in one pass.
+  ///
+  /// Each rename still happens individually — folders are never moved together —
+  /// but the media scanner is refreshed once for the whole batch. A folder that
+  /// cannot be hidden (missing, already hidden, or a name collision) is reported
+  /// in [BatchHideResult.failed] and does not stop the remaining folders.
+  Future<BatchHideResult> hideAll(Iterable<String> folderPaths) async {
+    final hidden = <String>[];
+    final failed = <BatchHideFailure>[];
+    final scanned = <String>{};
+
+    for (final path in folderPaths) {
+      try {
+        final renamed = await _hideWithoutScan(path);
+        hidden.add(renamed);
+        scanned.add(renamed);
+        // The parent is re-indexed too so the old name leaves the MediaStore.
+        scanned.add(Directory(renamed).parent.path);
+      } on FolderOperationException catch (error) {
+        failed.add(BatchHideFailure(path, error.message));
+      }
+    }
+
+    await _scanner.refreshAll(scanned);
+    return BatchHideResult(hidden: hidden, failed: failed);
+  }
+
   Future<String> _toggle(String folderPath, {required bool hide}) async {
+    final renamed = await _hideWithoutScan(folderPath, hide: hide);
+    await _scanner.refresh(renamed, alsoParent: Directory(renamed).parent.path);
+    return renamed;
+  }
+
+  Future<String> _hideWithoutScan(String folderPath, {bool hide = true}) async {
     final normalized = _normalize(folderPath);
     final source = Directory(normalized);
 
@@ -65,7 +122,6 @@ class FolderService {
 
     try {
       final renamed = await source.rename(targetPath);
-      await _scanner.refresh(renamed.path, alsoParent: parentPath);
       return renamed.path;
     } on FileSystemException catch (error) {
       throw FolderOperationException(_describe(error));

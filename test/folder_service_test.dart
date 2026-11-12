@@ -105,8 +105,119 @@ void main() {
     });
   });
 
-  group('RescanService', () {
-    test('finds user-hidden folders and skips folders already known', () async {
+  group('FolderService.hideAll', () {
+    test('hides every folder and reports the new paths', () async {
+      Directory(p.join(sandbox.path, 'Alpha')).createSync();
+      Directory(p.join(sandbox.path, 'Beta')).createSync();
+      Directory(p.join(sandbox.path, 'Gamma')).createSync();
+      final service = FolderService(scanner: _NoopScanner());
+
+      final result = await service.hideAll([
+        p.join(sandbox.path, 'Alpha'),
+        p.join(sandbox.path, 'Beta'),
+        p.join(sandbox.path, 'Gamma'),
+      ]);
+
+      expect(result.hidden, [
+        p.join(sandbox.path, '.Alpha'),
+        p.join(sandbox.path, '.Beta'),
+        p.join(sandbox.path, '.Gamma'),
+      ]);
+      expect(result.failed, isEmpty);
+      expect(result.hasFailures, isFalse);
+      for (final name in ['.Alpha', '.Beta', '.Gamma']) {
+        expect(Directory(p.join(sandbox.path, name)).existsSync(), isTrue);
+      }
+    });
+
+    test('one bad folder does not stop the rest', () async {
+      Directory(p.join(sandbox.path, 'Alpha')).createSync();
+      Directory(p.join(sandbox.path, '.Already')).createSync();
+      Directory(p.join(sandbox.path, 'Gamma')).createSync();
+      final service = FolderService(scanner: _NoopScanner());
+
+      final result = await service.hideAll([
+        p.join(sandbox.path, 'Alpha'),
+        p.join(sandbox.path, 'Nope'),
+        p.join(sandbox.path, '.Already'),
+        p.join(sandbox.path, 'Gamma'),
+      ]);
+
+      expect(result.hidden, [
+        p.join(sandbox.path, '.Alpha'),
+        p.join(sandbox.path, '.Gamma'),
+      ]);
+      expect(
+        result.failed.map((failure) => failure.path),
+        [p.join(sandbox.path, 'Nope'), p.join(sandbox.path, '.Already')],
+      );
+      expect(result.hasFailures, isTrue);
+      expect(result.failed.first.message, contains('no longer exists'));
+      expect(result.failed.last.message, 'Folder is already hidden.');
+    });
+
+    test('reports a name collision without renaming anything', () async {
+      Directory(p.join(sandbox.path, 'Alpha')).createSync();
+      Directory(p.join(sandbox.path, '.Alpha')).createSync();
+      final service = FolderService(scanner: _NoopScanner());
+
+      final result = await service.hideAll([p.join(sandbox.path, 'Alpha')]);
+
+      expect(result.hidden, isEmpty);
+      expect(result.failed.single.message, contains('already exists'));
+      expect(Directory(p.join(sandbox.path, 'Alpha')).existsSync(), isTrue);
+    });
+
+    test('files inside batch-hidden folders are untouched', () async {
+      final alpha = Directory(p.join(sandbox.path, 'Alpha'))..createSync();
+      final beta = Directory(p.join(sandbox.path, 'Beta'))..createSync();
+      File(p.join(alpha.path, 'a.txt')).writeAsStringSync('aaa');
+      File(p.join(beta.path, 'b.txt')).writeAsStringSync('bbb');
+      final service = FolderService(scanner: _NoopScanner());
+
+      await service.hideAll([alpha.path, beta.path]);
+
+      expect(File(p.join(sandbox.path, '.Alpha', 'a.txt')).readAsStringSync(), 'aaa');
+      expect(File(p.join(sandbox.path, '.Beta', 'b.txt')).readAsStringSync(), 'bbb');
+    });
+
+    test('an empty selection is a no-op', () async {
+      final service = FolderService(scanner: _NoopScanner());
+
+      final result = await service.hideAll(const []);
+
+      expect(result.hidden, isEmpty);
+      expect(result.failed, isEmpty);
+    });
+
+    test('rescans each affected folder once', () async {
+      Directory(p.join(sandbox.path, 'Alpha')).createSync();
+      Directory(p.join(sandbox.path, 'Beta')).createSync();
+      final scanner = _RecordingScanner();
+      final service = FolderService(scanner: scanner);
+
+      await service.hideAll([p.join(sandbox.path, 'Alpha'), p.join(sandbox.path, 'Beta')]);
+
+      // Hidden folders plus their parent, deduplicated.
+      expect(scanner.scanned, {
+        p.join(sandbox.path, '.Alpha'),
+        p.join(sandbox.path, '.Beta'),
+        sandbox.path,
+      });
+    });
+
+    test('a failing folder is not rescanned', () async {
+      Directory(p.join(sandbox.path, '.Already')).createSync();
+      final scanner = _RecordingScanner();
+      final service = FolderService(scanner: scanner);
+
+      await service.hideAll([p.join(sandbox.path, '.Already')]);
+
+      expect(scanner.scanned, isEmpty);
+    });
+  });
+
+  group('RescanService', () {    test('finds user-hidden folders and skips folders already known', () async {
       Directory(p.join(sandbox.path, '.Trip 2026')).createSync();
       Directory(p.join(sandbox.path, '.Archive')).createSync();
       final service = RescanService();
@@ -164,4 +275,15 @@ void main() {
 class _NoopScanner extends MediaScannerService {
   @override
   Future<void> refresh(String path, {String? alsoParent}) async {}
+}
+
+/// Records every path handed to the scanner so batch refreshes can be asserted.
+class _RecordingScanner extends MediaScannerService {
+  final Set<String> scanned = <String>{};
+
+  @override
+  Future<void> refresh(String path, {String? alsoParent}) async {
+    scanned.add(path);
+    if (alsoParent != null) scanned.add(alsoParent);
+  }
 }

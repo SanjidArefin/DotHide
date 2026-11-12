@@ -15,4 +15,14 @@ class MediaScannerService {
       // Scanning is best-effort: a failure must never break a successful rename.
     }
   }
+
+  /// Re-indexes every path in [paths] exactly once.
+  ///
+  /// Used after a batch rename so a single pass covers every affected folder.
+  Future<void> refreshAll(Iterable<String> paths) async {
+    for (final path in paths.toSet()) {
+      if (path.isEmpty) continue;
+      await refresh(path);
+    }
+  }
 }

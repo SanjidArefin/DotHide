@@ -50,3 +50,6 @@ app.*.map.json
 # Local working notes (not part of the app)
 context.md
 plan.md
+
+# Tests are local-only for now
+test/

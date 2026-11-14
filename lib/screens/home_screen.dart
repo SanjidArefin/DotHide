@@ -10,23 +10,38 @@ import '../services/rescan_service.dart';
 import '../widgets/message_view.dart';
 import 'folder_picker_screen.dart';
 
-/// Lists the folders this app is currently hiding and drives hide/unhide.
+/// Lists the items this app is currently hiding and drives hide/unhide.
 class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key, required this.onOpenSettings});
+  HomeScreen({
+    super.key,
+    required this.onOpenSettings,
+    HiddenFolderStore? store,
+    FolderService? folders,
+    RescanService? rescanService,
+    PermissionService? permissions,
+  }) : store = store ?? HiddenFolderStore(),
+       folders = folders ?? FolderService(),
+       rescanService = rescanService ?? RescanService(),
+       permissions = permissions ?? PermissionService();
 
   final VoidCallback onOpenSettings;
+  final HiddenFolderStore store;
+  final FolderService folders;
+  final RescanService rescanService;
+  final PermissionService permissions;
 
   @override
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final HiddenFolderStore _store = HiddenFolderStore();
-  final FolderService _folders = FolderService();
-  final RescanService _rescanService = RescanService();
-  final PermissionService _permissions = PermissionService();
+  HiddenFolderStore get _store => widget.store;
+  FolderService get _folders => widget.folders;
+  RescanService get _rescanService => widget.rescanService;
+  PermissionService get _permissions => widget.permissions;
 
   List<String> _hidden = const [];
+  final Set<String> _selectedHidden = <String>{};
   bool _loading = true;
   bool _busy = false;
   StorageAccess _access = StorageAccess.denied;
@@ -39,11 +54,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _load() async {
     final access = await _permissions.status();
-    final hidden = access == StorageAccess.granted ? await _store.pruneMissing() : await _store.all();
+    final hidden = access == StorageAccess.granted
+        ? await _store.pruneMissing()
+        : await _store.all();
     if (!mounted) return;
     setState(() {
       _access = access;
       _hidden = hidden;
+      _selectedHidden.removeWhere((path) => !hidden.contains(path));
       _loading = false;
     });
   }
@@ -66,17 +84,22 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     if (selected == null || selected.isEmpty || !mounted) return;
 
-    // The picker skips already-hidden folders, but a rescan or an external
+    // The picker skips already-hidden items, but a rescan or an external
     // change may have hidden one in the meantime.
-    final targets = selected.where((path) => !FolderService.isHidden(path)).toList(growable: false);
+    final targets = selected
+        .where((path) => !FolderService.isHidden(path))
+        .toList(growable: false);
     if (targets.isEmpty) {
-      _notify('Those folders are already hidden.');
+      _notify('Those items are already hidden.');
       return;
     }
 
     setState(() => _busy = true);
     try {
       final result = await _folders.hideAll(targets);
+      for (final change in result.changes) {
+        await _store.rebaseDescendants(change.sourcePath, change.targetPath);
+      }
       for (final path in result.hidden) {
         await _store.add(path);
       }
@@ -91,16 +114,18 @@ class _HomeScreenState extends State<HomeScreen> {
   String _summarize(BatchHideResult result) {
     final hidden = result.hidden.length;
     if (!result.hasFailures) {
-      return 'Hidden $hidden folder${hidden == 1 ? '' : 's'}';
+      return 'Hidden $hidden item${hidden == 1 ? '' : 's'}';
     }
 
     final first = result.failed.first;
     final reason = '${FolderService.displayName(first.path)}: ${first.message}';
     if (hidden == 0) {
-      return result.failed.length == 1 ? reason : 'Could not hide any folder. $reason';
+      return result.failed.length == 1
+          ? reason
+          : 'Could not hide any items. $reason';
     }
     final failed = result.failed.length;
-    return 'Hidden $hidden folder${hidden == 1 ? '' : 's'}, $failed failed — $reason';
+    return 'Hidden $hidden item${hidden == 1 ? '' : 's'}, $failed failed — $reason';
   }
 
   Future<void> _unhide(String path) async {
@@ -111,6 +136,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final newPath = await _folders.unhide(path);
       await _store.remove(path);
+      await _store.rebaseDescendants(path, newPath);
       await _load();
       _notify('Restored ${FolderService.displayName(newPath)}');
     } on FolderOperationException catch (error) {
@@ -121,34 +147,115 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<bool?> _confirmUnhide(String path) => showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('Unhide folder?'),
-          content: Text('"${FolderService.displayName(path)}" will become visible again in galleries and file apps.'),
-          actions: [
-            TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.of(context).pop(true), child: const Text('Unhide')),
-          ],
+  Future<void> _unhideSelected() async {
+    if (_access != StorageAccess.granted) {
+      _notify('Grant file access first.');
+      return;
+    }
+    final selected = _selectedHidden.toList(growable: false);
+    if (selected.isEmpty) return;
+
+    final confirmed = await _confirmUnhideSelected(selected.length);
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      final result = await _folders.unhideAll(selected);
+      for (final change in result.changes) {
+        await _store.remove(change.sourcePath);
+        await _store.rebaseDescendants(change.sourcePath, change.targetPath);
+      }
+      if (mounted) setState(_selectedHidden.clear);
+      await _load();
+      _notify(_summarizeUnhide(result));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<bool?> _confirmUnhideSelected(int count) => showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text('Unhide $count item${count == 1 ? '' : 's'}?'),
+      content: const Text(
+        'Selected items will become visible again in galleries and file apps.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
         ),
-      );
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('Unhide'),
+        ),
+      ],
+    ),
+  );
+
+  String _summarizeUnhide(BatchUnhideResult result) {
+    final restored = result.unhidden.length;
+    if (!result.hasFailures) {
+      return 'Restored $restored item${restored == 1 ? '' : 's'}';
+    }
+
+    final first = result.failed.first;
+    final reason = '${FolderService.displayName(first.path)}: ${first.message}';
+    if (restored == 0) {
+      return result.failed.length == 1
+          ? reason
+          : 'Could not restore any items. $reason';
+    }
+    return 'Restored $restored item${restored == 1 ? '' : 's'}, '
+        '${result.failed.length} failed — $reason';
+  }
+
+  void _toggleHiddenSelection(String path) {
+    setState(() {
+      if (!_selectedHidden.add(path)) _selectedHidden.remove(path);
+    });
+  }
+
+  void _selectAllHidden() => setState(() => _selectedHidden.addAll(_hidden));
+
+  void _clearHiddenSelection() => setState(_selectedHidden.clear);
+
+  Future<bool?> _confirmUnhide(String path) => showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('Unhide item?'),
+      content: Text(
+        '"${FolderService.displayName(path)}" will become visible again in galleries and file apps.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('Unhide'),
+        ),
+      ],
+    ),
+  );
 
   Future<void> _rescan() async {
-    if (_access != StorageAccess.granted) {      _notify('Grant file access first.');
+    if (_access != StorageAccess.granted) {
+      _notify('Grant file access first.');
       return;
     }
 
     setState(() => _busy = true);
     try {
       final known = (await _store.all()).toSet();
-      final candidates = await _rescanService.scan(
-        [PermissionService.externalStorageRoot],
-        known: known,
-      );
+      final candidates = await _rescanService.scan([
+        PermissionService.externalStorageRoot,
+      ], known: known);
 
       if (!mounted) return;
       if (candidates.isEmpty) {
-        _notify('No hidden folders found.');
+        _notify('No hidden items found.');
         return;
       }
 
@@ -158,13 +265,17 @@ class _HomeScreenState extends State<HomeScreen> {
       final merged = {...known, ...selected.map((candidate) => candidate.path)};
       await _store.replaceAll(merged);
       await _load();
-      _notify('Imported ${selected.length} folder${selected.length == 1 ? '' : 's'}');
+      _notify(
+        'Imported ${selected.length} item${selected.length == 1 ? '' : 's'}',
+      );
     } finally {
       if (mounted) setState(() => _busy = false);
     }
   }
 
-  Future<List<RescanCandidate>> _pickCandidates(List<RescanCandidate> candidates) async {
+  Future<List<RescanCandidate>> _pickCandidates(
+    List<RescanCandidate> candidates,
+  ) async {
     final selectedPaths = <String>{};
 
     final confirmed = await showDialog<bool>(
@@ -173,7 +284,7 @@ class _HomeScreenState extends State<HomeScreen> {
         builder: (context, setDialogState) {
           final theme = Theme.of(context);
           return AlertDialog(
-            title: const Text('Found hidden folders'),
+            title: const Text('Found hidden items'),
             contentPadding: const EdgeInsets.fromLTRB(0, 12, 0, 0),
             content: SizedBox(
               width: double.maxFinite,
@@ -187,12 +298,24 @@ class _HomeScreenState extends State<HomeScreen> {
                     value: checked,
                     dense: true,
                     controlAffinity: ListTileControlAffinity.leading,
-                    title: Text(candidate.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                    secondary: Icon(
+                      candidate.isDirectory
+                          ? Icons.folder_outlined
+                          : Icons.insert_drive_file_outlined,
+                      color: theme.colorScheme.onSurfaceVariant,
+                    ),
+                    title: Text(
+                      candidate.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
                     subtitle: Text(
                       p.dirname(candidate.path),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: theme.colorScheme.onSurfaceVariant,
+                      ),
                     ),
                     onChanged: (value) => setDialogState(() {
                       if (value == true) {
@@ -206,9 +329,14 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.of(context).pop(false), child: const Text('Cancel')),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Cancel'),
+              ),
               FilledButton(
-                onPressed: selectedPaths.isEmpty ? null : () => Navigator.of(context).pop(true),
+                onPressed: selectedPaths.isEmpty
+                    ? null
+                    : () => Navigator.of(context).pop(true),
                 child: const Text('Add'),
               ),
             ],
@@ -218,39 +346,74 @@ class _HomeScreenState extends State<HomeScreen> {
     );
 
     if (confirmed != true) return const [];
-    return candidates.where((candidate) => selectedPaths.contains(candidate.path)).toList();
+    return candidates
+        .where((candidate) => selectedPaths.contains(candidate.path))
+        .toList();
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final selectionMode = _selectedHidden.isNotEmpty;
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('DotHide'),
-        actions: [
-          IconButton(
-            tooltip: 'Rescan for hidden folders',
-            onPressed: _busy ? null : _rescan,
-            icon: const Icon(Icons.refresh),
-          ),
-          IconButton(
-            tooltip: 'Settings',
-            onPressed: widget.onOpenSettings,
-            icon: const Icon(Icons.settings_outlined),
-          ),
-        ],
+        leading: selectionMode
+            ? IconButton(
+                tooltip: 'Clear selection',
+                onPressed: _busy ? null : _clearHiddenSelection,
+                icon: const Icon(Icons.close),
+              )
+            : null,
+        title: Text(
+          selectionMode ? '${_selectedHidden.length} selected' : 'DotHide',
+        ),
+        actions: selectionMode
+            ? [
+                IconButton(
+                  tooltip: 'Select all',
+                  onPressed: _busy || _selectedHidden.length == _hidden.length
+                      ? null
+                      : _selectAllHidden,
+                  icon: const Icon(Icons.select_all),
+                ),
+              ]
+            : [
+                if (_hidden.isNotEmpty)
+                  IconButton(
+                    tooltip: 'Select all hidden items',
+                    onPressed: _busy ? null : _selectAllHidden,
+                    icon: const Icon(Icons.select_all),
+                  ),
+                IconButton(
+                  tooltip: 'Rescan for hidden items',
+                  onPressed: _busy ? null : _rescan,
+                  icon: const Icon(Icons.refresh),
+                ),
+                IconButton(
+                  tooltip: 'Settings',
+                  onPressed: widget.onOpenSettings,
+                  icon: const Icon(Icons.settings_outlined),
+                ),
+              ],
       ),
       body: Column(
         children: [
           if (_access != StorageAccess.granted) _AccessBanner(onFix: _load),
-          Expanded(child: _buildBody(theme)),        ],
+          Expanded(child: _buildBody(theme)),
+        ],
       ),
       floatingActionButton: _access == StorageAccess.granted
           ? FloatingActionButton.extended(
-              onPressed: _busy ? null : _hideFolder,
-              icon: const Icon(Icons.add),
-              label: const Text('Hide folders'),
+              onPressed: _busy
+                  ? null
+                  : (selectionMode ? _unhideSelected : _hideFolder),
+              icon: Icon(selectionMode ? Icons.visibility_outlined : Icons.add),
+              label: Text(
+                selectionMode
+                    ? 'Unhide Selected (${_selectedHidden.length})'
+                    : 'Hide folders',
+              ),
             )
           : null,
     );
@@ -262,8 +425,9 @@ class _HomeScreenState extends State<HomeScreen> {
     if (_hidden.isEmpty) {
       return const MessageView(
         icon: Icons.visibility_off_outlined,
-        title: 'No hidden folders',
-        message: 'Folders you hide are listed here. Their name gains a leading dot, '
+        title: 'No hidden items',
+        message:
+            'Folders and files you hide are listed here. Their name gains a leading dot, '
             'which keeps them out of galleries and file browsers.',
       );
     }
@@ -276,8 +440,13 @@ class _HomeScreenState extends State<HomeScreen> {
           separatorBuilder: (_, _) => const SizedBox(height: 10),
           itemBuilder: (context, index) {
             final path = _hidden[index];
-            return _HiddenFolderTile(
+            return _HiddenEntryTile(
               path: path,
+              selected: _selectedHidden.contains(path),
+              selectionMode: _selectedHidden.isNotEmpty,
+              onToggleSelection: _busy
+                  ? null
+                  : () => _toggleHiddenSelection(path),
               onUnhide: _busy ? null : () => _unhide(path),
             );
           },
@@ -294,30 +463,56 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-class _HiddenFolderTile extends StatelessWidget {
-  const _HiddenFolderTile({required this.path, required this.onUnhide});
+class _HiddenEntryTile extends StatelessWidget {
+  const _HiddenEntryTile({
+    required this.path,
+    required this.selected,
+    required this.selectionMode,
+    required this.onToggleSelection,
+    required this.onUnhide,
+  });
 
   final String path;
+  final bool selected;
+  final bool selectionMode;
+  final VoidCallback? onToggleSelection;
   final VoidCallback? onUnhide;
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final name = FolderService.displayName(path);
-    final exists = Directory(path).existsSync();
+    final type = FileSystemEntity.typeSync(path, followLinks: false);
+    final exists =
+        type == FileSystemEntityType.directory ||
+        type == FileSystemEntityType.file;
+    final isDirectory = type == FileSystemEntityType.directory;
 
     return Card(
       child: InkWell(
-        onTap: onUnhide,
+        onTap: selectionMode ? onToggleSelection : onUnhide,
+        onLongPress: onToggleSelection,
         borderRadius: BorderRadius.circular(14),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
           child: Row(
             children: [
-              Icon(
-                exists ? Icons.folder_off_outlined : Icons.help_outline,
-                color: theme.colorScheme.onSurfaceVariant,
-              ),
+              if (selectionMode)
+                Checkbox(
+                  value: selected,
+                  onChanged: onToggleSelection == null
+                      ? null
+                      : (_) => onToggleSelection!(),
+                )
+              else
+                Icon(
+                  !exists
+                      ? Icons.help_outline
+                      : isDirectory
+                      ? Icons.folder_off_outlined
+                      : Icons.insert_drive_file_outlined,
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
               const SizedBox(width: 16),
               Expanded(
                 child: Column(
@@ -327,7 +522,9 @@ class _HiddenFolderTile extends StatelessWidget {
                       name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+                      style: theme.textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                     const SizedBox(height: 2),
                     Text(
@@ -335,17 +532,18 @@ class _HiddenFolderTile extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: theme.textTheme.bodySmall?.copyWith(
-                        color: exists ? theme.colorScheme.onSurfaceVariant : theme.colorScheme.error,
+                        color: exists
+                            ? theme.colorScheme.onSurfaceVariant
+                            : theme.colorScheme.error,
                       ),
                     ),
                   ],
                 ),
               ),
-              const SizedBox(width: 8),
-              TextButton(
-                onPressed: onUnhide,
-                child: const Text('Unhide'),
-              ),
+              if (!selectionMode) ...[
+                const SizedBox(width: 8),
+                TextButton(onPressed: onUnhide, child: const Text('Unhide')),
+              ],
             ],
           ),
         ),
@@ -368,7 +566,11 @@ class _AccessBanner extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       child: Row(
         children: [
-          Icon(Icons.lock_outline, size: 18, color: theme.colorScheme.onSurfaceVariant),
+          Icon(
+            Icons.lock_outline,
+            size: 18,
+            color: theme.colorScheme.onSurfaceVariant,
+          ),
           const SizedBox(width: 12),
           Expanded(
             child: Text(

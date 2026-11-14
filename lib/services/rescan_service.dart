@@ -2,18 +2,20 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
-/// A dot-prefixed directory discovered on disk that the app has no record of.
+/// A dot-prefixed file or directory discovered on disk without an app record.
 class RescanCandidate {
-  RescanCandidate(this.path, this.name);
+  RescanCandidate(this.path, this.name, {this.isDirectory = true});
 
   final String path;
 
-  /// Folder name without the leading dot.
+  /// Item name without the leading dot.
   final String name;
+
+  final bool isDirectory;
 }
 
-/// Finds already-hidden (dot-prefixed) folders so they can be re-imported after
-/// a reinstall, when `SharedPreferences` no longer has them.
+/// Finds already-hidden (dot-prefixed) items so they can be re-imported after a
+/// reinstall, when `SharedPreferences` no longer has their paths.
 class RescanService {
   RescanService({this.maxDepth = 3, this.maxDirectories = 4000});
 
@@ -49,7 +51,7 @@ class RescanService {
     '.trash',
   };
 
-  /// Walks [roots] and returns dot-prefixed folders not already in [known].
+  /// Walks [roots] and returns dot-prefixed files and folders not in [known].
   ///
   /// A folder is treated as a candidate only if the name is a "normal" user
   /// folder that merely has a dot prepended — see [_looksUserHidden].
@@ -78,11 +80,14 @@ class RescanService {
         }
 
         for (final entry in entries) {
-          if (entry is! Directory) continue;
+          if (entry is! Directory && entry is! File) continue;
           final name = p.basename(entry.path);
+          final isDirectory = entry is Directory;
 
           if (!name.startsWith('.')) {
-            if (depth < maxDepth) queue.add((entry, depth + 1));
+            if (isDirectory && depth < maxDepth) {
+              queue.add((entry, depth + 1));
+            }
             continue;
           }
 
@@ -90,7 +95,11 @@ class RescanService {
 
           final path = p.normalize(entry.path);
           if (!known.contains(path)) {
-            found[path] = RescanCandidate(path, name.substring(1));
+            found[path] = RescanCandidate(
+              path,
+              name.substring(1),
+              isDirectory: isDirectory,
+            );
           }
           // Hidden folders are not descended into: their contents stay private.
         }
@@ -112,9 +121,11 @@ class RescanService {
     // A second leading dot (e.g. "..") is not something this app creates.
     if (bare.startsWith('.')) return false;
     // Must contain at least one letter or digit to be a real folder name.
-    return bare.codeUnits.any((unit) =>
-        (unit >= 0x30 && unit <= 0x39) || // 0-9
-        (unit >= 0x41 && unit <= 0x5A) || // A-Z
-        (unit >= 0x61 && unit <= 0x7A)); // a-z
+    return bare.codeUnits.any(
+      (unit) =>
+          (unit >= 0x30 && unit <= 0x39) || // 0-9
+          (unit >= 0x41 && unit <= 0x5A) || // A-Z
+          (unit >= 0x61 && unit <= 0x7A),
+    ); // a-z
   }
 }
